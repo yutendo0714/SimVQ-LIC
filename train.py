@@ -36,18 +36,25 @@ class RateDistortionLoss(nn.Module):
     def forward(self, output, target):
         N, _, H, W = target.size()
         out = {}
-        num_pixels = N * H * W
+        # num_pixels = N * H * W
 
-        out["bpp_loss"] = sum(
-            (torch.log(likelihoods).sum() / (-math.log(2) * num_pixels))
-            for likelihoods in output["likelihoods"].values()
-        )
+        # out["bpp_loss"] = sum(
+        #     (torch.log(likelihoods).sum() / (-math.log(2) * num_pixels))
+        #     for likelihoods in output["likelihoods"].values()
+        # )
+
+        # bpp_loss を削除またはゼロで固定
+        out["bpp_loss"] = torch.tensor(0.).to(target.device)
         if self.type == 'mse':
             out["mse_loss"] = self.mse(output["x_hat"], target)
             out["loss"] = self.lmbda * 255 ** 2 * out["mse_loss"] + out["bpp_loss"]
         else:
             out['ms_ssim_loss'] = compute_msssim(output["x_hat"], target)
             out["loss"] = self.lmbda * (1 - out['ms_ssim_loss']) + out["bpp_loss"]
+        # SimVQのcommitment lossを加える
+        if "vq_commit_loss" in output:
+            out["vq_commit_loss"] = output["vq_commit_loss"]
+            out["loss"] += out["vq_commit_loss"]
 
         return out
 
@@ -118,6 +125,12 @@ def train_one_epoch(
     model.train()
     device = next(model.parameters()).device
 
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            print(name, type(module))
+    exit()
+
+
     for i, d in enumerate(train_dataloader):
         d = d.to(device)
         optimizer.zero_grad()
@@ -146,6 +159,9 @@ def train_one_epoch(
                     f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
                     f"\tAux loss: {aux_loss.item():.2f}"
                 )
+                # SimVQのVQ lossが存在すれば出力
+                if "vq_commit_loss" in out_criterion:
+                    print(f"\tVQ loss: {out_criterion['vq_commit_loss'].item():.5f}")
             else:
                 print(
                     f"Train epoch {epoch}: ["
@@ -156,7 +172,9 @@ def train_one_epoch(
                     f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
                     f"\tAux loss: {aux_loss.item():.2f}"
                 )
-
+                # SimVQのVQ lossが存在すれば出力
+                if "vq_commit_loss" in out_criterion:
+                    print(f"\tVQ loss: {out_criterion['vq_commit_loss'].item():.5f}")
 
 def test_epoch(epoch, test_dataloader, model, criterion, type='mse'):
     model.eval()

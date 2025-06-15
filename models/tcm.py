@@ -22,6 +22,8 @@ from timm.models.layers import trunc_normal_, DropPath
 import numpy as np
 import math
 
+from quantize import SimVQ
+
 
 SCALES_MIN = 0.11
 SCALES_MAX = 256
@@ -415,6 +417,7 @@ class TCM(CompressionModel):
 
         self.entropy_bottleneck = EntropyBottleneck(192)
         self.gaussian_conditional = GaussianConditional(None)
+        self.simvq = SimVQ(n_e=512, e_dim=M)
 
     def update(self, scale_table=None, force=False):
         if scale_table is None:
@@ -424,59 +427,75 @@ class TCM(CompressionModel):
         return updated
     
     def forward(self, x):
+        # 通常のエンコーダ
         y = self.g_a(x)
-        y_shape = y.shape[2:]
-        z = self.h_a(y)
-        _, z_likelihoods = self.entropy_bottleneck(z)
 
-        z_offset = self.entropy_bottleneck._get_medians()
-        z_tmp = z - z_offset
-        z_hat = ste_round(z_tmp) + z_offset
+        # SimVQで直接量子化（ハイパー無視）
+        (z_q, _, indices), vq_loss = self.simvq(y)
 
-        latent_scales = self.h_scale_s(z_hat)
-        latent_means = self.h_mean_s(z_hat)
+        # 再構成
+        x_hat = self.g_s(z_q)
 
-        y_slices = y.chunk(self.num_slices, 1)
-        y_hat_slices = []
-        y_likelihood = []
-        mu_list = []
-        scale_list = []
-        for slice_index, y_slice in enumerate(y_slices):
-            support_slices = (y_hat_slices if self.max_support_slices < 0 else y_hat_slices[:self.max_support_slices])
-            mean_support = torch.cat([latent_means] + support_slices, dim=1)
-            mean_support = self.atten_mean[slice_index](mean_support)
-            mu = self.cc_mean_transforms[slice_index](mean_support)
-            mu = mu[:, :, :y_shape[0], :y_shape[1]]
-            mu_list.append(mu)
-            scale_support = torch.cat([latent_scales] + support_slices, dim=1)
-            scale_support = self.atten_scale[slice_index](scale_support)
-            scale = self.cc_scale_transforms[slice_index](scale_support)
-            scale = scale[:, :, :y_shape[0], :y_shape[1]]
-            scale_list.append(scale)
-            _, y_slice_likelihood = self.gaussian_conditional(y_slice, scale, mu)
-            y_likelihood.append(y_slice_likelihood)
-            y_hat_slice = ste_round(y_slice - mu) + mu
-            # if self.training:
-            #     lrp_support = torch.cat([mean_support + torch.randn(mean_support.size()).cuda().mul(scale_support), y_hat_slice], dim=1)
-            # else:
-            lrp_support = torch.cat([mean_support, y_hat_slice], dim=1)
-            lrp = self.lrp_transforms[slice_index](lrp_support)
-            lrp = 0.5 * torch.tanh(lrp)
-            y_hat_slice += lrp
-
-            y_hat_slices.append(y_hat_slice)
-
-        y_hat = torch.cat(y_hat_slices, dim=1)
-        means = torch.cat(mu_list, dim=1)
-        scales = torch.cat(scale_list, dim=1)
-        y_likelihoods = torch.cat(y_likelihood, dim=1)
-        x_hat = self.g_s(y_hat)
-
+        # 出力
         return {
             "x_hat": x_hat,
-            "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
-            "para":{"means": means, "scales":scales, "y":y}
+            "vq_commit_loss": vq_loss.commitment,
+            "vq_indices": indices,
         }
+
+        # y = self.g_a(x)
+        # y_shape = y.shape[2:]
+        # z = self.h_a(y)
+        # _, z_likelihoods = self.entropy_bottleneck(z)
+
+        # z_offset = self.entropy_bottleneck._get_medians()
+        # z_tmp = z - z_offset
+        # z_hat = ste_round(z_tmp) + z_offset
+
+        # latent_scales = self.h_scale_s(z_hat)
+        # latent_means = self.h_mean_s(z_hat)
+
+        # y_slices = y.chunk(self.num_slices, 1)
+        # y_hat_slices = []
+        # y_likelihood = []
+        # mu_list = []
+        # scale_list = []
+        # for slice_index, y_slice in enumerate(y_slices):
+        #     support_slices = (y_hat_slices if self.max_support_slices < 0 else y_hat_slices[:self.max_support_slices])
+        #     mean_support = torch.cat([latent_means] + support_slices, dim=1)
+        #     mean_support = self.atten_mean[slice_index](mean_support)
+        #     mu = self.cc_mean_transforms[slice_index](mean_support)
+        #     mu = mu[:, :, :y_shape[0], :y_shape[1]]
+        #     mu_list.append(mu)
+        #     scale_support = torch.cat([latent_scales] + support_slices, dim=1)
+        #     scale_support = self.atten_scale[slice_index](scale_support)
+        #     scale = self.cc_scale_transforms[slice_index](scale_support)
+        #     scale = scale[:, :, :y_shape[0], :y_shape[1]]
+        #     scale_list.append(scale)
+        #     _, y_slice_likelihood = self.gaussian_conditional(y_slice, scale, mu)
+        #     y_likelihood.append(y_slice_likelihood)
+        #     y_hat_slice = ste_round(y_slice - mu) + mu
+        #     # if self.training:
+        #     #     lrp_support = torch.cat([mean_support + torch.randn(mean_support.size()).cuda().mul(scale_support), y_hat_slice], dim=1)
+        #     # else:
+        #     lrp_support = torch.cat([mean_support, y_hat_slice], dim=1)
+        #     lrp = self.lrp_transforms[slice_index](lrp_support)
+        #     lrp = 0.5 * torch.tanh(lrp)
+        #     y_hat_slice += lrp
+
+        #     y_hat_slices.append(y_hat_slice)
+
+        # y_hat = torch.cat(y_hat_slices, dim=1)
+        # means = torch.cat(mu_list, dim=1)
+        # scales = torch.cat(scale_list, dim=1)
+        # y_likelihoods = torch.cat(y_likelihood, dim=1)
+        # x_hat = self.g_s(y_hat)
+
+        # return {
+        #     "x_hat": x_hat,
+        #     "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+        #     "para":{"means": means, "scales":scales, "y":y}
+        # }
 
     def load_state_dict(self, state_dict):
         update_registered_buffers(
