@@ -22,7 +22,7 @@ from timm.models.layers import trunc_normal_, DropPath
 import numpy as np
 import math
 
-from quantize import SimVQ
+from .quantize import SimVQ
 
 
 SCALES_MIN = 0.11
@@ -497,14 +497,14 @@ class TCM(CompressionModel):
         #     "para":{"means": means, "scales":scales, "y":y}
         # }
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict, strict=True):
         update_registered_buffers(
             self.gaussian_conditional,
             "gaussian_conditional",
             ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
             state_dict,
         )
-        super().load_state_dict(state_dict)
+        super().load_state_dict(state_dict, strict=strict)
 
     @classmethod
     def from_state_dict(cls, state_dict):

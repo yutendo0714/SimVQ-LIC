@@ -46,7 +46,6 @@ class SimVQ(nn.Module):
             self.re_embed = n_e
 
         self.sane_index_shape = sane_index_shape
-        self.simvq = SimVQ(n_e=256, e_dim=M)
 
     def remap_to_used(self, inds):
         ishape = inds.shape
