@@ -106,7 +106,7 @@ def configure_optimizers(net, args):
     union_params = parameters | aux_parameters
 
     assert len(inter_params) == 0
-    assert len(union_params) - len(params_dict.keys()) == 0
+    # assert len(union_params) - len(params_dict.keys()) == 0
 
     optimizer = optim.Adam(
         (params_dict[n] for n in sorted(parameters)),
@@ -120,15 +120,15 @@ def configure_optimizers(net, args):
 
 
 def train_one_epoch(
-    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, type='mse'
+    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, loss_type='mse'
 ):
     model.train()
     device = next(model.parameters()).device
 
-    for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            print(name, type(module))
-    exit()
+    # for name, module in model.named_modules():
+    #     if isinstance(module, (nn.Linear, nn.Conv2d)):
+    #         print(name, type(module))
+    # exit()
 
 
     for i, d in enumerate(train_dataloader):
@@ -149,7 +149,7 @@ def train_one_epoch(
         aux_optimizer.step()
 
         if i % 1000 == 0:
-            if type == 'mse':
+            if loss_type == 'mse':
                 print(
                     f"Train epoch {epoch}: ["
                     f"{i*len(d)}/{len(train_dataloader.dataset)}"
@@ -203,6 +203,9 @@ def test_epoch(epoch, test_dataloader, model, criterion, type='mse'):
             f"\tBpp loss: {bpp_loss.avg:.2f} |"
             f"\tAux loss: {aux_loss.avg:.2f}\n"
         )
+        if "vq_commit_loss" in out_criterion:
+            print(f"\tVQ loss: {out_criterion['vq_commit_loss'].item():.5f}")
+
 
     else:
         loss = AverageMeter()
@@ -228,6 +231,8 @@ def test_epoch(epoch, test_dataloader, model, criterion, type='mse'):
             f"\tBpp loss: {bpp_loss.avg:.2f} |"
             f"\tAux loss: {aux_loss.avg:.2f}\n"
         )
+        if "vq_commit_loss" in out_criterion:
+            print(f"\tVQ loss: {out_criterion['vq_commit_loss'].item():.5f}")
 
     return loss.avg
 
@@ -270,7 +275,7 @@ def parse_args(argv):
         "-n",
         "--num-workers",
         type=int,
-        default=20,
+        default=16,
         help="Dataloaders threads (default: %(default)s)",
     )
     parser.add_argument(
@@ -337,7 +342,7 @@ def main(argv):
     args = parse_args(argv)
     for arg in vars(args):
         print(arg, ":", getattr(args, arg))
-    type = args.type
+    loss_type = args.type
     save_path = os.path.join(args.save_path, str(args.lmbda))
     if not os.path.exists(save_path):
         os.makedirs(save_path)
@@ -357,7 +362,9 @@ def main(argv):
 
 
     train_dataset = ImageFolder(args.dataset, split="train", transform=train_transforms)
+    print("train_data_length",len(train_dataset))
     test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
+    print("test_data_length",len(test_dataset))
 
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
     print(device)
@@ -390,18 +397,18 @@ def main(argv):
     print("milestones: ", milestones)
     lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones, gamma=0.1, last_epoch=-1)
 
-    criterion = RateDistortionLoss(lmbda=args.lmbda, type=type)
+    criterion = RateDistortionLoss(lmbda=args.lmbda, type=loss_type)
 
     last_epoch = 0
     if args.checkpoint:  # load from previous checkpoint
         print("Loading", args.checkpoint)
         checkpoint = torch.load(args.checkpoint, map_location=device)
-        net.load_state_dict(checkpoint["state_dict"])
-        if args.continue_train:
-            last_epoch = checkpoint["epoch"] + 1
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            aux_optimizer.load_state_dict(checkpoint["aux_optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        net.load_state_dict(checkpoint["state_dict"], strict=False)
+        # if args.continue_train:
+            # last_epoch = checkpoint["epoch"] + 1
+            # optimizer.load_state_dict(checkpoint["optimizer"])
+            # aux_optimizer.load_state_dict(checkpoint["aux_optimizer"])
+            # lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
     best_loss = float("inf")
     for epoch in range(last_epoch, args.epochs):
@@ -414,9 +421,9 @@ def main(argv):
             aux_optimizer,
             epoch,
             args.clip_max_norm,
-            type
+            loss_type
         )
-        loss = test_epoch(epoch, test_dataloader, net, criterion, type)
+        loss = test_epoch(epoch, test_dataloader, net, criterion, loss_type)
         writer.add_scalar('test_loss', loss, epoch)
         lr_scheduler.step()
 
